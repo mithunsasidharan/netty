@@ -25,7 +25,6 @@ import io.netty.channel.ChannelMetadata;
 import io.netty.channel.ChannelOutboundBuffer;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.ChannelPromise;
-import io.netty.channel.ConnectTimeoutException;
 import io.netty.channel.DefaultFileRegion;
 import io.netty.channel.EventLoop;
 import io.netty.channel.FileRegion;
@@ -35,35 +34,32 @@ import io.netty.channel.unix.SocketWritableByteChannel;
 import io.netty.channel.unix.UnixChannelUtil;
 import io.netty.util.internal.PlatformDependent;
 import io.netty.util.internal.StringUtil;
-import io.netty.util.internal.ThrowableUtil;
 import io.netty.util.internal.UnstableApi;
+import io.netty.util.internal.logging.InternalLogger;
+import io.netty.util.internal.logging.InternalLoggerFactory;
 
 import java.io.IOException;
 import java.net.SocketAddress;
 import java.nio.ByteBuffer;
-import java.nio.channels.ClosedChannelException;
-import java.nio.channels.ConnectionPendingException;
 import java.nio.channels.WritableByteChannel;
 import java.util.concurrent.Executor;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
 
 @UnstableApi
 public abstract class AbstractKQueueStreamChannel extends AbstractKQueueChannel implements DuplexChannel {
+    private static final InternalLogger logger = InternalLoggerFactory.getInstance(AbstractKQueueStreamChannel.class);
     private static final ChannelMetadata METADATA = new ChannelMetadata(false, 16);
-    private static final ClosedChannelException DO_CLOSE_CLOSED_CHANNEL_EXCEPTION = ThrowableUtil.unknownStackTrace(
-            new ClosedChannelException(), AbstractKQueueStreamChannel.class, "doClose()");
     private static final String EXPECTED_TYPES =
             " (expected: " + StringUtil.simpleClassName(ByteBuf.class) + ", " +
                     StringUtil.simpleClassName(DefaultFileRegion.class) + ')';
 
-    private ChannelPromise connectPromise;
-    private ScheduledFuture<?> connectTimeoutFuture;
-    private SocketAddress requestedRemoteAddress;
     private WritableByteChannel byteChannel;
 
     AbstractKQueueStreamChannel(Channel parent, BsdSocket fd, boolean active) {
         super(parent, fd, active, true);
+    }
+
+    AbstractKQueueStreamChannel(Channel parent, BsdSocket fd, SocketAddress remote) {
+        super(parent, fd, remote);
     }
 
     AbstractKQueueStreamChannel(BsdSocket fd) {
@@ -378,31 +374,10 @@ public abstract class AbstractKQueueStreamChannel extends AbstractKQueueChannel 
                 "unsupported message type: " + StringUtil.simpleClassName(msg) + EXPECTED_TYPES);
     }
 
-    private void shutdownOutput0(final ChannelPromise promise) {
-        try {
-            socket.shutdown(false, true);
-            promise.setSuccess();
-        } catch (Throwable cause) {
-            promise.setFailure(cause);
-        }
-    }
-
-    private void shutdownInput0(final ChannelPromise promise) {
-        try {
-            socket.shutdown(true, false);
-            promise.setSuccess();
-        } catch (Throwable cause) {
-            promise.setFailure(cause);
-        }
-    }
-
-    private void shutdown0(final ChannelPromise promise) {
-        try {
-            socket.shutdown(true, true);
-            promise.setSuccess();
-        } catch (Throwable cause) {
-            promise.setFailure(cause);
-        }
+    @UnstableApi
+    @Override
+    protected final void doShutdownOutput() throws Exception {
+        socket.shutdown(false, true);
     }
 
     @Override
@@ -427,26 +402,16 @@ public abstract class AbstractKQueueStreamChannel extends AbstractKQueueChannel 
 
     @Override
     public ChannelFuture shutdownOutput(final ChannelPromise promise) {
-        Executor closeExecutor = ((KQueueStreamUnsafe) unsafe()).prepareToClose();
-        if (closeExecutor != null) {
-            closeExecutor.execute(new Runnable() {
+        EventLoop loop = eventLoop();
+        if (loop.inEventLoop()) {
+            ((AbstractUnsafe) unsafe()).shutdownOutput(promise);
+        } else {
+            loop.execute(new Runnable() {
                 @Override
                 public void run() {
-                    shutdownOutput0(promise);
+                    ((AbstractUnsafe) unsafe()).shutdownOutput(promise);
                 }
             });
-        } else {
-            EventLoop loop = eventLoop();
-            if (loop.inEventLoop()) {
-                shutdownOutput0(promise);
-            } else {
-                loop.execute(new Runnable() {
-                    @Override
-                    public void run() {
-                        shutdownOutput0(promise);
-                    }
-                });
-            }
         }
         return promise;
     }
@@ -458,28 +423,28 @@ public abstract class AbstractKQueueStreamChannel extends AbstractKQueueChannel 
 
     @Override
     public ChannelFuture shutdownInput(final ChannelPromise promise) {
-        Executor closeExecutor = ((KQueueStreamUnsafe) unsafe()).prepareToClose();
-        if (closeExecutor != null) {
-            closeExecutor.execute(new Runnable() {
+        EventLoop loop = eventLoop();
+        if (loop.inEventLoop()) {
+            shutdownInput0(promise);
+        } else {
+            loop.execute(new Runnable() {
                 @Override
                 public void run() {
                     shutdownInput0(promise);
                 }
             });
-        } else {
-            EventLoop loop = eventLoop();
-            if (loop.inEventLoop()) {
-                shutdownInput0(promise);
-            } else {
-                loop.execute(new Runnable() {
-                    @Override
-                    public void run() {
-                        shutdownInput0(promise);
-                    }
-                });
-            }
         }
         return promise;
+    }
+
+    private void shutdownInput0(ChannelPromise promise) {
+        try {
+            socket.shutdown(true, false);
+        } catch (Throwable cause) {
+            promise.setFailure(cause);
+            return;
+        }
+        promise.setSuccess();
     }
 
     @Override
@@ -489,68 +454,49 @@ public abstract class AbstractKQueueStreamChannel extends AbstractKQueueChannel 
 
     @Override
     public ChannelFuture shutdown(final ChannelPromise promise) {
-        Executor closeExecutor = ((KQueueStreamUnsafe) unsafe()).prepareToClose();
-        if (closeExecutor != null) {
-            closeExecutor.execute(new Runnable() {
+        ChannelFuture shutdownOutputFuture = shutdownOutput();
+        if (shutdownOutputFuture.isDone()) {
+            shutdownOutputDone(shutdownOutputFuture, promise);
+        } else {
+            shutdownOutputFuture.addListener(new ChannelFutureListener() {
                 @Override
-                public void run() {
-                    shutdown0(promise);
+                public void operationComplete(final ChannelFuture shutdownOutputFuture) throws Exception {
+                    shutdownOutputDone(shutdownOutputFuture, promise);
                 }
             });
-        } else {
-            EventLoop loop = eventLoop();
-            if (loop.inEventLoop()) {
-                shutdown0(promise);
-            } else {
-                loop.execute(new Runnable() {
-                    @Override
-                    public void run() {
-                        shutdown0(promise);
-                    }
-                });
-            }
         }
         return promise;
     }
 
-    @Override
-    protected void doClose() throws Exception {
-        ChannelPromise promise = connectPromise;
-        if (promise != null) {
-            // Use tryFailure() instead of setFailure() to avoid the race against cancel().
-            promise.tryFailure(DO_CLOSE_CLOSED_CHANNEL_EXCEPTION);
-            connectPromise = null;
+    private void shutdownOutputDone(final ChannelFuture shutdownOutputFuture, final ChannelPromise promise) {
+        ChannelFuture shutdownInputFuture = shutdownInput();
+        if (shutdownInputFuture.isDone()) {
+            shutdownDone(shutdownOutputFuture, shutdownInputFuture, promise);
+        } else {
+            shutdownInputFuture.addListener(new ChannelFutureListener() {
+                @Override
+                public void operationComplete(ChannelFuture shutdownInputFuture) throws Exception {
+                    shutdownDone(shutdownOutputFuture, shutdownInputFuture, promise);
+                }
+            });
         }
-
-        ScheduledFuture<?> future = connectTimeoutFuture;
-        if (future != null) {
-            future.cancel(false);
-            connectTimeoutFuture = null;
-        }
-        // Calling super.doClose() first so splceTo(...) will fail on next call.
-        super.doClose();
     }
 
-    /**
-     * Connect to the remote peer
-     */
-    protected boolean doConnect(SocketAddress remoteAddress, SocketAddress localAddress) throws Exception {
-        if (localAddress != null) {
-            socket.bind(localAddress);
-        }
-
-        boolean success = false;
-        try {
-            boolean connected = socket.connect(remoteAddress);
-            if (!connected) {
-                writeFilter(true);
+    private static void shutdownDone(ChannelFuture shutdownOutputFuture,
+                                     ChannelFuture shutdownInputFuture,
+                                     ChannelPromise promise) {
+        Throwable shutdownOutputCause = shutdownOutputFuture.cause();
+        Throwable shutdownInputCause = shutdownInputFuture.cause();
+        if (shutdownOutputCause != null) {
+            if (shutdownInputCause != null) {
+                logger.debug("Exception suppressed because a previous exception occurred.",
+                        shutdownInputCause);
             }
-            success = true;
-            return connected;
-        } finally {
-            if (!success) {
-                doClose();
-            }
+            promise.setFailure(shutdownOutputCause);
+        } else if (shutdownInputCause != null) {
+            promise.setFailure(shutdownInputCause);
+        } else {
+            promise.setSuccess();
         }
     }
 
@@ -619,145 +565,6 @@ public abstract class AbstractKQueueStreamChannel extends AbstractKQueueChannel 
                 handleReadException(pipeline, byteBuf, t, close, allocHandle);
             } finally {
                 readReadyFinally(config);
-            }
-        }
-
-        @Override
-        void writeReady() {
-            if (connectPromise != null) {
-                // pending connect which is now complete so handle it.
-                finishConnect();
-            } else {
-                super.writeReady();
-            }
-        }
-
-        @Override
-        public void connect(
-                final SocketAddress remoteAddress, final SocketAddress localAddress, final ChannelPromise promise) {
-            if (!promise.setUncancellable() || !ensureOpen(promise)) {
-                return;
-            }
-
-            try {
-                if (connectPromise != null) {
-                    throw new ConnectionPendingException();
-                }
-
-                boolean wasActive = isActive();
-                if (doConnect(remoteAddress, localAddress)) {
-                    fulfillConnectPromise(promise, wasActive);
-                } else {
-                    connectPromise = promise;
-                    requestedRemoteAddress = remoteAddress;
-
-                    // Schedule connect timeout.
-                    int connectTimeoutMillis = config().getConnectTimeoutMillis();
-                    if (connectTimeoutMillis > 0) {
-                        connectTimeoutFuture = eventLoop().schedule(new Runnable() {
-                            @Override
-                            public void run() {
-                                ChannelPromise connectPromise = AbstractKQueueStreamChannel.this.connectPromise;
-                                ConnectTimeoutException cause =
-                                        new ConnectTimeoutException("connection timed out: " + remoteAddress);
-                                if (connectPromise != null && connectPromise.tryFailure(cause)) {
-                                    close(voidPromise());
-                                }
-                            }
-                        }, connectTimeoutMillis, TimeUnit.MILLISECONDS);
-                    }
-
-                    promise.addListener(new ChannelFutureListener() {
-                        @Override
-                        public void operationComplete(ChannelFuture future) throws Exception {
-                            if (future.isCancelled()) {
-                                if (connectTimeoutFuture != null) {
-                                    connectTimeoutFuture.cancel(false);
-                                }
-                                connectPromise = null;
-                                close(voidPromise());
-                            }
-                        }
-                    });
-                }
-            } catch (Throwable t) {
-                closeIfClosed();
-                promise.tryFailure(annotateConnectException(t, remoteAddress));
-            }
-        }
-
-        private void fulfillConnectPromise(ChannelPromise promise, boolean wasActive) {
-            if (promise == null) {
-                // Closed via cancellation and the promise has been notified already.
-                return;
-            }
-            active = true;
-
-            // Get the state as trySuccess() may trigger an ChannelFutureListener that will close the Channel.
-            // We still need to ensure we call fireChannelActive() in this case.
-            boolean active = isActive();
-
-            // trySuccess() will return false if a user cancelled the connection attempt.
-            boolean promiseSet = promise.trySuccess();
-
-            // Regardless if the connection attempt was cancelled, channelActive() event should be triggered,
-            // because what happened is what happened.
-            if (!wasActive && active) {
-                pipeline().fireChannelActive();
-            }
-
-            // If a user cancelled the connection attempt, close the channel, which is followed by channelInactive().
-            if (!promiseSet) {
-                close(voidPromise());
-            }
-        }
-
-        private void fulfillConnectPromise(ChannelPromise promise, Throwable cause) {
-            if (promise == null) {
-                // Closed via cancellation and the promise has been notified already.
-                return;
-            }
-
-            // Use tryFailure() instead of setFailure() to avoid the race against cancel().
-            promise.tryFailure(cause);
-            closeIfClosed();
-        }
-
-        private void finishConnect() {
-            // Note this method is invoked by the event loop only if the connection attempt was
-            // neither cancelled nor timed out.
-
-            assert eventLoop().inEventLoop();
-
-            boolean connectStillInProgress = false;
-            try {
-                boolean wasActive = isActive();
-                if (!doFinishConnect()) {
-                    connectStillInProgress = true;
-                    return;
-                }
-                fulfillConnectPromise(connectPromise, wasActive);
-            } catch (Throwable t) {
-                fulfillConnectPromise(connectPromise, annotateConnectException(t, requestedRemoteAddress));
-            } finally {
-                if (!connectStillInProgress) {
-                    // Check for null as the connectTimeoutFuture is only created if a connectTimeoutMillis > 0 is used
-                    // See https://github.com/netty/netty/issues/1770
-                    if (connectTimeoutFuture != null) {
-                        connectTimeoutFuture.cancel(false);
-                    }
-                    connectPromise = null;
-                }
-            }
-        }
-
-        boolean doFinishConnect() throws Exception {
-            if (socket.finishConnect()) {
-                writeFilter(false);
-                return true;
-            } else {
-                writeFilter(true);
-                return false;
             }
         }
 

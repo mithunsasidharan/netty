@@ -99,7 +99,7 @@ public final class HttpConversionUtil {
      * <a href="https://tools.ietf.org/html/rfc7540#section-8.1.2.3">rfc7540, 8.1.2.3</a> states the path must not
      * be empty, and instead should be {@code /}.
      */
-    private static final AsciiString EMPTY_REQUEST_PATH = new AsciiString("/");
+    private static final AsciiString EMPTY_REQUEST_PATH = AsciiString.cached("/");
 
     private HttpConversionUtil() {
     }
@@ -154,7 +154,7 @@ public final class HttpConversionUtil {
         private final AsciiString text;
 
         ExtensionHeaderNames(String text) {
-            this.text = new AsciiString(text);
+            this.text = AsciiString.cached(text);
         }
 
         public AsciiString text() {
@@ -361,7 +361,7 @@ public final class HttpConversionUtil {
             }
         } else if (in instanceof HttpResponse) {
             HttpResponse response = (HttpResponse) in;
-            out.status(new AsciiString(Integer.toString(response.status().code())));
+            out.status(response.status().codeAsText());
         }
 
         // Add the HTTP headers which have not been consumed above
@@ -446,16 +446,19 @@ public final class HttpConversionUtil {
         return path.isEmpty() ? EMPTY_REQUEST_PATH : new AsciiString(path);
     }
 
-    private static void setHttp2Authority(String authority, Http2Headers out) {
+    // package-private for testing only
+    static void setHttp2Authority(String authority, Http2Headers out) {
         // The authority MUST NOT include the deprecated "userinfo" subcomponent
         if (authority != null) {
-            int endOfUserInfo = authority.indexOf('@');
-            if (endOfUserInfo < 0) {
-                out.authority(new AsciiString(authority));
-            } else if (endOfUserInfo + 1 < authority.length()) {
-                out.authority(new AsciiString(authority.substring(endOfUserInfo + 1)));
+            if (authority.isEmpty()) {
+                out.authority(EMPTY_STRING);
             } else {
-                throw new IllegalArgumentException("authority: " + authority);
+                int start = authority.indexOf('@') + 1;
+                int length = authority.length() - start;
+                if (length == 0) {
+                    throw new IllegalArgumentException("authority: " + authority);
+                }
+                out.authority(new AsciiString(authority, start, length));
             }
         }
     }

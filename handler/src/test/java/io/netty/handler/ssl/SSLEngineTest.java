@@ -57,13 +57,15 @@ import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
 import java.security.KeyStore;
+import java.security.Provider;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
-import java.security.Provider;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLEngineResult;
@@ -72,6 +74,10 @@ import javax.net.ssl.SSLHandshakeException;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSession;
 import javax.security.cert.X509Certificate;
+
+import static io.netty.handler.ssl.SslUtils.PROTOCOL_TLS_V1;
+import static io.netty.handler.ssl.SslUtils.PROTOCOL_TLS_V1_2;
+import static io.netty.handler.ssl.SslUtils.SSL_RECORD_HEADER_LENGTH;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
@@ -120,15 +126,15 @@ public abstract class SSLEngineTest {
 
     private static final String CLIENT_X509_CERT_PEM =
             "-----BEGIN CERTIFICATE-----\n" +
-                    "MIIBlzCCAQACAQEwDQYJKoZIhvcNAQELBQAwFDESMBAGA1UEAwwJbG9jYWxob3N0\n" +
-                    "MB4XDTE2MDkyMDE5NTIyMFoXDTE3MDkyMDE5NTIyMFowFDESMBAGA1UEAwwJdGxz\n" +
-                    "Y2xpZW50MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDB19iXOYtyPp6cMJiG\n" +
-                    "9C9QNw/ro6SWpv9H0wPcPBhWRrPBJvXppVWxMMxYuJFSKC8cGRqpK+k0h9omn2l+\n" +
-                    "c1ReKFEMi0csZRZMGjkUYv0/ol6tlz0CFvQOU5lRxkh1JWI/P1/b36zJCTvyNEV4\n" +
-                    "upjAV1eAu27twS8hBrPK2+pIqwIDAQABMA0GCSqGSIb3DQEBCwUAA4GBAMa35kuy\n" +
-                    "WzuHLg7iwnDVX4ZT/4iTJg1fZDms2dTqFWH+RYlxsytePUkY3ksGHl+VJgoDBK3X\n" +
-                    "G6/dqNa5BQDyFF0/dDQ2XYTrj5Yd0MsLA00AkFdSow5RyhWXJXzVHgKE48ZFW5Bt\n" +
-                    "NW9uXaerRzFR1mG2+0AghxCNMhuWxIblW7L0\n" +
+                    "MIIBmTCCAQICAQEwDQYJKoZIhvcNAQELBQAwFDESMBAGA1UEAwwJbG9jYWxob3N0\n" +
+                    "MCAXDTE3MDkyMTAzNDUwMVoYDzIxMTcwOTIyMDM0NTAxWjAUMRIwEAYDVQQDEwl0\n" +
+                    "bHNjbGllbnQwgZ8wDQYJKoZIhvcNAQEBBQADgY0AMIGJAoGBAMHX2Jc5i3I+npww\n" +
+                    "mIb0L1A3D+ujpJam/0fTA9w8GFZGs8Em9emlVbEwzFi4kVIoLxwZGqkr6TSH2iaf\n" +
+                    "aX5zVF4oUQyLRyxlFkwaORRi/T+iXq2XPQIW9A5TmVHGSHUlYj8/X9vfrMkJO/I0\n" +
+                    "RXi6mMBXV4C7bu3BLyEGs8rb6kirAgMBAAEwDQYJKoZIhvcNAQELBQADgYEAYLYI\n" +
+                    "5wvUaGRqJn7pA4xR9nEhsNpQbza3bJayQvyiJsB5rn9yBJsk5ch3tBBCfh/MA6PW\n" +
+                    "xcy2hS5rhZUTve6FK3Kr2GiUYy+keYmbna1UJPKPgIR3BX66g+Ev5RUinmbieC2J\n" +
+                    "eE0EtFfLq3uzj8HjakuxOGJz9h+bnCGBhgWWOBo=\n" +
                     "-----END CERTIFICATE-----\n";
 
     private static final String CLIENT_PRIVATE_KEY_PEM =
@@ -150,8 +156,6 @@ public abstract class SSLEngineTest {
                     "-----END PRIVATE KEY-----\n";
     private static final String CLIENT_X509_CERT_CHAIN_PEM = CLIENT_X509_CERT_PEM + X509_CERT_PEM;
 
-    protected static final String PROTOCOL_TLS_V1_2 = "TLSv1.2";
-    protected static final String PROTOCOL_SSL_V2_HELLO = "SSLv2Hello";
     private static final String PRINCIPAL_NAME = "CN=e8ac02fa0d65a84219016045db8b05c485b4ecdf.netty.test";
 
     @Mock
@@ -1069,6 +1073,7 @@ public abstract class SSLEngineTest {
         } finally {
             cleanupClientSslEngine(clientEngine);
             cleanupServerSslEngine(serverEngine);
+            ssc.delete();
         }
     }
 
@@ -1103,6 +1108,7 @@ public abstract class SSLEngineTest {
         } finally {
             cleanupClientSslEngine(clientEngine);
             cleanupServerSslEngine(serverEngine);
+            ssc.delete();
         }
     }
 
@@ -1214,6 +1220,7 @@ public abstract class SSLEngineTest {
         clientChannel = ccf.channel();
 
         serverLatch.await();
+        ssc.delete();
     }
 
     protected void testEnablingAnAlreadyDisabledSslProtocol(String[] protocols1, String[] protocols2) throws Exception {
@@ -1236,7 +1243,7 @@ public abstract class SSLEngineTest {
             assertArrayEquals(protocols1, enabledProtocols);
 
             // Enable a protocol that is currently disabled
-            sslEngine.setEnabledProtocols(new String[]{PROTOCOL_TLS_V1_2});
+            sslEngine.setEnabledProtocols(new String[]{ PROTOCOL_TLS_V1_2 });
 
             // The protocol that was just enabled should be returned
             enabledProtocols = sslEngine.getEnabledProtocols();
@@ -1397,24 +1404,28 @@ public abstract class SSLEngineTest {
             throws InterruptedException, SSLException, CertificateException {
         SelfSignedCertificate ssc = new SelfSignedCertificate();
 
-        setupHandlers(SslContextBuilder.forServer(ssc.certificate(), ssc.privateKey(), null)
-                        .sslProvider(sslServerProvider())
-                        .sslContextProvider(serverSslContextProvider())
-                        .ciphers(null, IdentityCipherSuiteFilter.INSTANCE)
-                        .applicationProtocolConfig(serverApn)
-                        .sessionCacheSize(0)
-                        .sessionTimeout(0)
-                        .build(),
+        try {
+          setupHandlers(SslContextBuilder.forServer(ssc.certificate(), ssc.privateKey(), null)
+                          .sslProvider(sslServerProvider())
+                          .sslContextProvider(serverSslContextProvider())
+                          .ciphers(null, IdentityCipherSuiteFilter.INSTANCE)
+                          .applicationProtocolConfig(serverApn)
+                          .sessionCacheSize(0)
+                          .sessionTimeout(0)
+                          .build(),
 
-                SslContextBuilder.forClient()
-                        .sslProvider(sslClientProvider())
-                        .sslContextProvider(clientSslContextProvider())
-                        .applicationProtocolConfig(clientApn)
-                        .trustManager(InsecureTrustManagerFactory.INSTANCE)
-                        .ciphers(null, IdentityCipherSuiteFilter.INSTANCE)
-                        .sessionCacheSize(0)
-                        .sessionTimeout(0)
-                        .build());
+                  SslContextBuilder.forClient()
+                          .sslProvider(sslClientProvider())
+                          .sslContextProvider(clientSslContextProvider())
+                          .applicationProtocolConfig(clientApn)
+                          .trustManager(InsecureTrustManagerFactory.INSTANCE)
+                          .ciphers(null, IdentityCipherSuiteFilter.INSTANCE)
+                          .sessionCacheSize(0)
+                          .sessionTimeout(0)
+                          .build());
+        } finally {
+          ssc.delete();
+        }
     }
 
     protected void setupHandlers(SslContext serverCtx, SslContext clientCtx)
@@ -1640,6 +1651,7 @@ public abstract class SSLEngineTest {
         } finally {
             cleanupClientSslEngine(client);
             cleanupServerSslEngine(server);
+            cert.delete();
         }
     }
 
@@ -1677,6 +1689,68 @@ public abstract class SSLEngineTest {
             cleanupClientSslEngine(client);
             cleanupServerSslEngine(server);
             cert.delete();
+        }
+    }
+
+    @Test
+    public void testHandshakeCompletesWithNonContiguousProtocolsTLSv1_2CipherOnly() throws Exception {
+        SelfSignedCertificate ssc = new SelfSignedCertificate();
+        // Select a mandatory cipher from the TLSv1.2 RFC https://www.ietf.org/rfc/rfc5246.txt so handshakes won't fail
+        // due to no shared/supported cipher.
+        final String sharedCipher = "TLS_RSA_WITH_AES_128_CBC_SHA";
+        clientSslCtx = SslContextBuilder.forClient()
+                .trustManager(InsecureTrustManagerFactory.INSTANCE)
+                .ciphers(Arrays.asList(sharedCipher))
+                .protocols(PROTOCOL_TLS_V1_2, PROTOCOL_TLS_V1)
+                .sslProvider(sslClientProvider())
+                .build();
+
+        serverSslCtx = SslContextBuilder.forServer(ssc.certificate(), ssc.privateKey())
+                .ciphers(Arrays.asList(sharedCipher))
+                .protocols(PROTOCOL_TLS_V1_2, PROTOCOL_TLS_V1)
+                .sslProvider(sslServerProvider())
+                .build();
+        SSLEngine clientEngine = null;
+        SSLEngine serverEngine = null;
+        try {
+            clientEngine = clientSslCtx.newEngine(UnpooledByteBufAllocator.DEFAULT);
+            serverEngine = serverSslCtx.newEngine(UnpooledByteBufAllocator.DEFAULT);
+            handshake(clientEngine, serverEngine);
+        } finally {
+            cleanupClientSslEngine(clientEngine);
+            cleanupServerSslEngine(serverEngine);
+            ssc.delete();
+        }
+    }
+
+    @Test
+    public void testHandshakeCompletesWithoutFilteringSupportedCipher() throws Exception {
+        SelfSignedCertificate ssc = new SelfSignedCertificate();
+        // Select a mandatory cipher from the TLSv1.2 RFC https://www.ietf.org/rfc/rfc5246.txt so handshakes won't fail
+        // due to no shared/supported cipher.
+        final String sharedCipher = "TLS_RSA_WITH_AES_128_CBC_SHA";
+        clientSslCtx = SslContextBuilder.forClient()
+                .trustManager(InsecureTrustManagerFactory.INSTANCE)
+                .ciphers(Arrays.asList(sharedCipher), SupportedCipherSuiteFilter.INSTANCE)
+                .protocols(PROTOCOL_TLS_V1_2, PROTOCOL_TLS_V1)
+                .sslProvider(sslClientProvider())
+                .build();
+
+        serverSslCtx = SslContextBuilder.forServer(ssc.certificate(), ssc.privateKey())
+                .ciphers(Arrays.asList(sharedCipher), SupportedCipherSuiteFilter.INSTANCE)
+                .protocols(PROTOCOL_TLS_V1_2, PROTOCOL_TLS_V1)
+                .sslProvider(sslServerProvider())
+                .build();
+        SSLEngine clientEngine = null;
+        SSLEngine serverEngine = null;
+        try {
+            clientEngine = clientSslCtx.newEngine(UnpooledByteBufAllocator.DEFAULT);
+            serverEngine = serverSslCtx.newEngine(UnpooledByteBufAllocator.DEFAULT);
+            handshake(clientEngine, serverEngine);
+        } finally {
+            cleanupClientSslEngine(clientEngine);
+            cleanupServerSslEngine(serverEngine);
+            ssc.delete();
         }
     }
 
@@ -1794,6 +1868,7 @@ public abstract class SSLEngineTest {
         } finally {
             cleanupClientSslEngine(client);
             cleanupServerSslEngine(server);
+            cert.delete();
         }
     }
 
@@ -1840,6 +1915,7 @@ public abstract class SSLEngineTest {
         } finally {
             cleanupClientSslEngine(client);
             cleanupServerSslEngine(server);
+            cert.delete();
         }
     }
 
@@ -2193,20 +2269,19 @@ public abstract class SSLEngineTest {
             int remaining = encClientToServer.remaining();
 
             // We limit the buffer so we have less then the header to read, this should result in an BUFFER_UNDERFLOW.
-            encClientToServer.limit(SslUtils.SSL_RECORD_HEADER_LENGTH - 1);
+            encClientToServer.limit(SSL_RECORD_HEADER_LENGTH - 1);
             result = server.unwrap(encClientToServer, plainServer);
             assertResultIsBufferUnderflow(result);
 
             // We limit the buffer so we can read the header but not the rest, this should result in an
             // BUFFER_UNDERFLOW.
-            encClientToServer.limit(SslUtils.SSL_RECORD_HEADER_LENGTH);
+            encClientToServer.limit(SSL_RECORD_HEADER_LENGTH);
             result = server.unwrap(encClientToServer, plainServer);
             assertResultIsBufferUnderflow(result);
 
             // We limit the buffer so we can read the header and partly the rest, this should result in an
             // BUFFER_UNDERFLOW.
-            encClientToServer.limit(
-                    SslUtils.SSL_RECORD_HEADER_LENGTH  + remaining - 1 - SslUtils.SSL_RECORD_HEADER_LENGTH);
+            encClientToServer.limit(SSL_RECORD_HEADER_LENGTH  + remaining - 1 - SSL_RECORD_HEADER_LENGTH);
             result = server.unwrap(encClientToServer, plainServer);
             assertResultIsBufferUnderflow(result);
 

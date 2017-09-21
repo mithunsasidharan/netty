@@ -43,6 +43,7 @@ import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 import static io.netty.buffer.Unpooled.copiedBuffer;
 import static io.netty.handler.codec.http2.Http2CodecUtil.connectionPrefaceBuf;
@@ -56,6 +57,7 @@ import static io.netty.util.CharsetUtil.UTF_8;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyBoolean;
 import static org.mockito.Mockito.anyInt;
@@ -213,6 +215,28 @@ public class Http2ConnectionHandlerTest {
     public void tearDown() throws Exception {
         if (handler != null) {
             handler.handlerRemoved(ctx);
+        }
+    }
+
+    @Test
+    public void onHttpServerUpgradeWithoutHandlerAdded() throws Exception {
+        handler = new Http2ConnectionHandlerBuilder().frameListener(new Http2FrameAdapter()).server(true).build();
+        try {
+            handler.onHttpServerUpgrade(new Http2Settings());
+            fail();
+        } catch (Http2Exception e) {
+            assertEquals(Http2Error.INTERNAL_ERROR, e.error());
+        }
+    }
+
+    @Test
+    public void onHttpClientUpgradeWithoutHandlerAdded() throws Exception {
+        handler = new Http2ConnectionHandlerBuilder().frameListener(new Http2FrameAdapter()).server(false).build();
+        try {
+            handler.onHttpClientUpgrade();
+            fail();
+        } catch (Http2Exception e) {
+            assertEquals(Http2Error.INTERNAL_ERROR, e.error());
         }
     }
 
@@ -627,6 +651,23 @@ public class Http2ConnectionHandlerTest {
     @Test
     public void writeRstStreamForKnownStreamUsingVoidPromise() throws Exception {
         writeRstStreamUsingVoidPromise(STREAM_ID);
+    }
+
+    @Test
+    public void gracefulShutdownTimeoutTest() throws Exception {
+        handler = newHandler();
+        final long expectedMillis = 1234;
+        handler.gracefulShutdownTimeoutMillis(expectedMillis);
+        handler.close(ctx, promise);
+        verify(executor).schedule(any(Runnable.class), eq(expectedMillis), eq(TimeUnit.MILLISECONDS));
+    }
+
+    @Test
+    public void gracefulShutdownIndefiniteTimeoutTest() throws Exception {
+        handler = newHandler();
+        handler.gracefulShutdownTimeoutMillis(-1);
+        handler.close(ctx, promise);
+        verify(executor, never()).schedule(any(Runnable.class), anyLong(), any(TimeUnit.class));
     }
 
     private void writeRstStreamUsingVoidPromise(int streamId) throws Exception {

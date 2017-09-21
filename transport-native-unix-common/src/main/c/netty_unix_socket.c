@@ -26,6 +26,7 @@
 #include <netinet/tcp.h>
 
 #include "netty_unix_errors.h"
+#include "netty_unix_jni.h"
 #include "netty_unix_socket.h"
 #include "netty_unix_util.h"
 
@@ -182,9 +183,33 @@ static int socket_type(JNIEnv* env) {
         }
         return AF_INET6;
     } else {
+        // Explicitly try to bind to ::1 to ensure IPV6 can really be used.
+        // See https://github.com/netty/netty/issues/7021.
+        struct sockaddr_in6 addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin6_family = AF_INET6;
+        addr.sin6_addr.s6_addr[15] = 1; /* [::1]:0 */
+        int res = bind(fd, (struct sockaddr *)&addr, sizeof(addr));
+
         close(fd);
-        return AF_INET6;
+        return res == 0 ? AF_INET6 : AF_INET;
     }
+}
+
+static void netty_unix_socket_optionHandleError(JNIEnv* env, int err, char* method) {
+    if (err == EBADF) {
+        netty_unix_errors_throwClosedChannelException(env);
+    } else {
+        netty_unix_errors_throwChannelExceptionErrorNo(env, method, err);
+    }
+}
+
+static void netty_unix_socket_setOptionHandleError(JNIEnv* env, int err) {
+    netty_unix_socket_optionHandleError(env, err, "setsockopt() failed: ");
+}
+
+static int netty_unix_socket_setOption0(jint fd, int level, int optname, const void* optval, socklen_t len) {
+    return setsockopt(fd, level, optname, optval, len);
 }
 
 static jint _socket(JNIEnv* env, jclass clazz, int type) {
@@ -192,12 +217,19 @@ static jint _socket(JNIEnv* env, jclass clazz, int type) {
     if (fd == -1) {
         return -errno;
     } else if (socketType == AF_INET6) {
-        // Allow to listen /connect ipv4 and ipv6
+        // Try to allow listen /connect ipv4 and ipv6
         int optval = 0;
-        if (netty_unix_socket_setOption(env, fd, IPPROTO_IPV6, IPV6_V6ONLY, &optval, sizeof(optval)) < 0) {
-            // Something went wrong so close the fd and return here. setOption(...) itself throws the exception already.
-            close(fd);
-            return -1;
+        if (netty_unix_socket_setOption0(fd, IPPROTO_IPV6, IPV6_V6ONLY, &optval, sizeof(optval)) < 0) {
+            if (errno != EAFNOSUPPORT) {
+                netty_unix_socket_setOptionHandleError(env, errno);
+                // Something went wrong so close the fd and return here. setOption(...) itself throws the exception already.
+                close(fd);
+                return -1;
+            }
+            // else we failed to enable dual stack mode.
+            // It is assumed the socket is re‐stricted to sending and receiving IPv6 packets only.
+            // Don't close fd and don't return -1. At best we can do is log.
+            // TODO: bubble this up to an actual Logger.
         }
     }
     return fd;
@@ -281,6 +313,10 @@ static jobject _recvFrom(JNIEnv* env, jint fd, void* buffer, jint pos, jint limi
             netty_unix_errors_throwClosedChannelException(env);
             return NULL;
         }
+        if (err == ECONNREFUSED) {
+            netty_unix_errors_throwPortUnreachableException(env, "recvfrom() failed");
+            return NULL;
+        }
         netty_unix_errors_throwIOExceptionErrorNo(env, "recvfrom() failed: ", err);
         return NULL;
     }
@@ -288,24 +324,8 @@ static jobject _recvFrom(JNIEnv* env, jint fd, void* buffer, jint pos, jint limi
     return createDatagramSocketAddress(env, &addr, res);
 }
 
-static void netty_unix_socket_optionHandleError(JNIEnv* env, int err, char* method) {
-    if (err == EBADF) {
-        netty_unix_errors_throwClosedChannelException(env);
-    } else {
-        netty_unix_errors_throwChannelExceptionErrorNo(env, method, err);
-    }
-}
-
-static void netty_unix_socket_setOptionHandleError(JNIEnv* env, int err) {
-    netty_unix_socket_optionHandleError(env, err, "setsockopt() failed: ");
-}
-
 static void netty_unix_socket_getOptionHandleError(JNIEnv* env, int err) {
     netty_unix_socket_optionHandleError(env, err, "getsockopt() failed: ");
-}
-
-static int netty_unix_socket_setOption0(jint fd, int level, int optname, const void* optval, socklen_t len) {
-    return setsockopt(fd, level, optname, optval, len);
 }
 
 static int netty_unix_socket_getOption0(jint fd, int level, int optname, void* optval, socklen_t optlen) {
@@ -402,6 +422,38 @@ static jint netty_unix_socket_finishConnect(JNIEnv* env, jclass clazz, jint fd) 
         return 0;
     }
     return -optval;
+}
+
+static jint netty_unix_socket_disconnect(JNIEnv* env, jclass clazz, jint fd) {
+    struct sockaddr_storage addr;
+    int len;
+
+    memset(&addr, 0, sizeof(addr));
+
+    // You can disconnect connection-less sockets by using AF_UNSPEC.
+    // See man 2 connect.
+    if (socketType == AF_INET6) {
+        struct sockaddr_in6* ip6addr = (struct sockaddr_in6*) &addr;
+        ip6addr->sin6_family = AF_UNSPEC;
+        len = sizeof(struct sockaddr_in6);
+    } else {
+        struct sockaddr_in* ipaddr = (struct sockaddr_in*) &addr;
+        ipaddr->sin_family = AF_UNSPEC;
+        len = sizeof(struct sockaddr_in);
+    }
+
+    int res;
+    int err;
+    do {
+        res = connect(fd, (struct sockaddr*) &addr, len);
+    } while (res == -1 && ((err = errno) == EINTR));
+
+    // EAFNOSUPPORT is harmless in this case.
+    // See http://www.unix.com/man-page/osx/2/connect/
+    if (res < 0 && err != EAFNOSUPPORT) {
+        return -err;
+    }
+    return 0;
 }
 
 static jint netty_unix_socket_accept(JNIEnv* env, jclass clazz, jint fd, jbyteArray acceptedAddress) {
@@ -581,7 +633,7 @@ static jint netty_unix_socket_connectDomainSocket(JNIEnv* env, jclass clazz, jin
 static jint netty_unix_socket_recvFd(JNIEnv* env, jclass clazz, jint fd) {
     int socketFd;
     struct msghdr descriptorMessage = { 0 };
-    struct iovec iov[1] = { 0 };
+    struct iovec iov[1] = { { 0 } };
     char control[CMSG_SPACE(sizeof(int))] = { 0 };
     char iovecData[1];
 
@@ -629,7 +681,7 @@ static jint netty_unix_socket_recvFd(JNIEnv* env, jclass clazz, jint fd) {
 
 static jint netty_unix_socket_sendFd(JNIEnv* env, jclass clazz, jint socketFd, jint fd) {
     struct msghdr descriptorMessage = { 0 };
-    struct iovec iov[1] = { 0 };
+    struct iovec iov[1] = { { 0 } };
     char control[CMSG_SPACE(sizeof(int))] = { 0 };
     char iovecData[1];
 
@@ -814,6 +866,7 @@ static const JNINativeMethod fixed_method_table[] = {
   { "listen", "(II)I", (void *) netty_unix_socket_listen },
   { "connect", "(I[BII)I", (void *) netty_unix_socket_connect },
   { "finishConnect", "(I)I", (void *) netty_unix_socket_finishConnect },
+  { "disconnect", "(I)I", (void *) netty_unix_socket_disconnect},
   { "accept", "(I[B)I", (void *) netty_unix_socket_accept },
   { "remoteAddress", "(I)[B", (void *) netty_unix_socket_remoteAddress },
   { "localAddress", "(I)[B", (void *) netty_unix_socket_localAddress },
@@ -974,7 +1027,7 @@ jint netty_unix_socket_JNI_OnLoad(JNIEnv* env, const char* packagePrefix) {
     free(mem);
 
     socketType = socket_type(env);
-    return JNI_VERSION_1_6;
+    return NETTY_JNI_VERSION;
 }
 
 void netty_unix_socket_JNI_OnUnLoad(JNIEnv* env) {

@@ -26,6 +26,8 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 
+import static io.netty.resolver.dns.UnixResolverDnsServerAddressStreamProvider.DEFAULT_NDOTS;
+import static io.netty.resolver.dns.UnixResolverDnsServerAddressStreamProvider.parseEtcResolverFirstNdots;
 import static org.junit.Assert.assertEquals;
 
 public class UnixResolverDnsServerAddressStreamProviderTest {
@@ -77,6 +79,38 @@ public class UnixResolverDnsServerAddressStreamProviderTest {
         assertHostNameEquals("127.0.0.5", stream.next());
     }
 
+    @Test
+    public void ndotsIsParsedIfPresent() throws IOException {
+        File f = buildFile("search localdomain\n" +
+                           "nameserver 127.0.0.11\n" +
+                           "options ndots:0\n");
+        assertEquals(0, parseEtcResolverFirstNdots(f));
+
+        f = buildFile("search localdomain\n" +
+                      "nameserver 127.0.0.11\n" +
+                      "options ndots:123 foo:goo\n");
+        assertEquals(123, parseEtcResolverFirstNdots(f));
+    }
+
+    @Test
+    public void defaultValueReturnedIfNdotsNotPresent() throws IOException {
+        File f = buildFile("search localdomain\n" +
+                           "nameserver 127.0.0.11\n");
+        assertEquals(DEFAULT_NDOTS, parseEtcResolverFirstNdots(f));
+    }
+
+    @Test
+    public void emptyEtcResolverDirectoryDoesNotThrow() throws IOException {
+        File f = buildFile("domain linecorp.local\n" +
+                           "nameserver 127.0.0.2\n" +
+                           "nameserver 127.0.0.3\n");
+        UnixResolverDnsServerAddressStreamProvider p =
+                new UnixResolverDnsServerAddressStreamProvider(f, folder.newFolder().listFiles());
+
+        DnsServerAddressStream stream = p.nameServerAddressStream("somehost");
+        assertHostNameEquals("127.0.0.2", stream.next());
+    }
+
     private File buildFile(String contents) throws IOException {
         File f = folder.newFile();
         OutputStream out = new FileOutputStream(f);
@@ -89,6 +123,6 @@ public class UnixResolverDnsServerAddressStreamProviderTest {
     }
 
     private static void assertHostNameEquals(String expectedHostname, InetSocketAddress next) {
-        assertEquals("unexpected hostname: " + next, expectedHostname, next.getHostName());
+        assertEquals("unexpected hostname: " + next, expectedHostname, next.getHostString());
     }
 }
