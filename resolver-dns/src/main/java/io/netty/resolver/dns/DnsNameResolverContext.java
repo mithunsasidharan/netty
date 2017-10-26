@@ -153,6 +153,8 @@ abstract class DnsNameResolverContext<T> {
     }
 
     private static final class SearchDomainUnknownHostException extends UnknownHostException {
+        private static final long serialVersionUID = -8573510133644997085L;
+
         SearchDomainUnknownHostException(Throwable cause, String originalHostname) {
             super("Search domain query failed. Original hostname: '" + originalHostname + "' " + cause.getMessage());
             setStackTrace(cause.getStackTrace());
@@ -733,7 +735,7 @@ abstract class DnsNameResolverContext<T> {
         DnsQuestion cnameQuestion = null;
         if (parent.supportsARecords()) {
             try {
-                if ((cnameQuestion = newQuestion(hostname, DnsRecordType.A)) == null) {
+                if ((cnameQuestion = newQuestion(cname, DnsRecordType.A)) == null) {
                     return;
                 }
             } catch (Throwable cause) {
@@ -744,7 +746,7 @@ abstract class DnsNameResolverContext<T> {
         }
         if (parent.supportsAAAARecords()) {
             try {
-                if ((cnameQuestion = newQuestion(hostname, DnsRecordType.AAAA)) == null) {
+                if ((cnameQuestion = newQuestion(cname, DnsRecordType.AAAA)) == null) {
                     return;
                 }
             } catch (Throwable cause) {
@@ -765,7 +767,7 @@ abstract class DnsNameResolverContext<T> {
         return true;
     }
 
-    private DnsQuestion newQuestion(String hostname, DnsRecordType type) {
+    private static DnsQuestion newQuestion(String hostname, DnsRecordType type) {
         try {
             return new DefaultDnsQuestion(hostname, type);
         } catch (IllegalArgumentException e) {

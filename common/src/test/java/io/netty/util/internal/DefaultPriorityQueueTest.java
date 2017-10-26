@@ -17,6 +17,7 @@ package io.netty.util.internal;
 
 import org.junit.Test;
 
+import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -116,7 +117,7 @@ public class DefaultPriorityQueueTest {
         testRemoval(true);
     }
 
-    private void testRemoval(boolean typed) {
+    private static void testRemoval(boolean typed) {
         PriorityQueue<TestElement> queue = new DefaultPriorityQueue<TestElement>(TestElementComparator.INSTANCE, 4);
         assertEmptyQueue(queue);
 
@@ -245,7 +246,9 @@ public class DefaultPriorityQueueTest {
         assertTrue(queue.isEmpty());
     }
 
-    private static final class TestElementComparator implements Comparator<TestElement> {
+    private static final class TestElementComparator implements Comparator<TestElement>, Serializable {
+        private static final long serialVersionUID = 7930368853384760103L;
+
         static final TestElementComparator INSTANCE = new TestElementComparator();
 
         private TestElementComparator() {
