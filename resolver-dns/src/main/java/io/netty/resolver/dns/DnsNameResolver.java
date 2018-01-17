@@ -600,7 +600,7 @@ public class DnsNameResolver extends InetNameResolver {
                                     Promise<InetAddress> promise,
                                     DnsCache resolveCache) {
         final List<? extends DnsCacheEntry> cachedEntries = resolveCache.get(hostname, additionals);
-        if (cachedEntries == null || cachedEntries.isEmpty()) {
+        if (cachedEntries == null) {
             return false;
         }
 
@@ -608,7 +608,9 @@ public class DnsNameResolver extends InetNameResolver {
         Throwable cause = null;
         synchronized (cachedEntries) {
             final int numEntries = cachedEntries.size();
-            assert numEntries > 0;
+            if (numEntries == 0) {
+                return false;
+            }
 
             if (cachedEntries.get(0).cause() != null) {
                 cause = cachedEntries.get(0).cause();
@@ -730,7 +732,7 @@ public class DnsNameResolver extends InetNameResolver {
                                        Promise<List<InetAddress>> promise,
                                        DnsCache resolveCache) {
         final List<? extends DnsCacheEntry> cachedEntries = resolveCache.get(hostname, additionals);
-        if (cachedEntries == null || cachedEntries.isEmpty()) {
+        if (cachedEntries == null) {
             return false;
         }
 
@@ -738,7 +740,9 @@ public class DnsNameResolver extends InetNameResolver {
         Throwable cause = null;
         synchronized (cachedEntries) {
             final int numEntries = cachedEntries.size();
-            assert numEntries > 0;
+            if (numEntries == 0) {
+                return false;
+            }
 
             if (cachedEntries.get(0).cause() != null) {
                 cause = cachedEntries.get(0).cause();
@@ -889,6 +893,24 @@ public class DnsNameResolver extends InetNameResolver {
             Promise<AddressedEnvelope<? extends DnsResponse, InetSocketAddress>> promise) {
 
         return query0(nameServerAddr, question, toArray(additionals, false), promise);
+    }
+
+    /**
+     * Returns {@code true} if the {@link Throwable} was caused by an timeout or transport error.
+     * These methods can be used on the {@link Future#cause()} that is returned by the various methods exposed by this
+     * {@link DnsNameResolver}.
+     */
+    public static boolean isTransportOrTimeoutError(Throwable cause) {
+        return cause != null && cause.getCause() instanceof DnsNameResolverException;
+    }
+
+    /**
+     * Returns {@code true} if the {@link Throwable} was caused by an timeout.
+     * These methods can be used on the {@link Future#cause()} that is returned by the various methods exposed by this
+     * {@link DnsNameResolver}.
+     */
+    public static boolean isTimeoutError(Throwable cause) {
+        return cause != null && cause.getCause() instanceof DnsNameResolverTimeoutException;
     }
 
     final Future<AddressedEnvelope<DnsResponse, InetSocketAddress>> query0(

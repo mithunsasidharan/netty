@@ -26,6 +26,7 @@ import io.netty.channel.ChannelOutboundBuffer;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.FileRegion;
 import io.netty.channel.RecvByteBufAllocator;
+import io.netty.channel.internal.ChannelUtils;
 import io.netty.channel.socket.ChannelInputShutdownEvent;
 import io.netty.channel.socket.ChannelInputShutdownReadComplete;
 import io.netty.util.internal.StringUtil;
@@ -33,6 +34,8 @@ import io.netty.util.internal.StringUtil;
 import java.io.IOException;
 import java.nio.channels.SelectableChannel;
 import java.nio.channels.SelectionKey;
+
+import static io.netty.channel.internal.ChannelUtils.WRITE_STATUS_SNDBUF_FULL;
 
 /**
  * {@link AbstractNioChannel} base class for {@link Channel}s that operate on bytes.
@@ -127,13 +130,7 @@ public abstract class AbstractNioByteChannel extends AbstractNioChannel {
                         byteBuf = null;
                         close = allocHandle.lastBytesRead() < 0;
                         if (close) {
-                            // Based upon the Javadocs it is possible that NIO may have spurious wake ups [1]. In this
-                            // case we should be more cautious and only set readPending to false if data was actually
-                            // read.
-                            // [1] https://docs.oracle.com/javase/7/docs/api/java/nio/channels/SelectionKey.html
-                            // That a selection key's ready set indicates that its channel is ready for some operation
-                            // category is a hint, but not a guarantee, that an operation in such a category may be
-                            // performed by a thread without causing the thread to block.
+                            // There is nothing left to read as we received an EOF.
                             readPending = false;
                         }
                         break;
@@ -167,12 +164,71 @@ public abstract class AbstractNioByteChannel extends AbstractNioChannel {
         }
     }
 
+    /**
+     * Write objects to the OS.
+     * @param in the collection which contains objects to write.
+     * @return The value that should be decremented from the write quantum which starts at
+     * {@link ChannelConfig#getWriteSpinCount()}. The typical use cases are as follows:
+     * <ul>
+     *     <li>0 - if no write was attempted. This is appropriate if an empty {@link ByteBuf} (or other empty content)
+     *     is encountered</li>
+     *     <li>1 - if a single call to write data was made to the OS</li>
+     *     <li>{@link ChannelUtils#WRITE_STATUS_SNDBUF_FULL} - if an attempt to write data was made to the OS, but no
+     *     data was accepted</li>
+     * </ul>
+     * @throws Exception if an I/O exception occurs during write.
+     */
+    protected final int doWrite0(ChannelOutboundBuffer in) throws Exception {
+        Object msg = in.current();
+        if (msg == null) {
+            // Directly return here so incompleteWrite(...) is not called.
+            return 0;
+        }
+        return doWriteInternal(in, in.current());
+    }
+
+    private int doWriteInternal(ChannelOutboundBuffer in, Object msg) throws Exception {
+        if (msg instanceof ByteBuf) {
+            ByteBuf buf = (ByteBuf) msg;
+            if (!buf.isReadable()) {
+                in.remove();
+                return 0;
+            }
+
+            final int localFlushedAmount = doWriteBytes(buf);
+            if (localFlushedAmount > 0) {
+                in.progress(localFlushedAmount);
+                if (!buf.isReadable()) {
+                    in.remove();
+                }
+                return 1;
+            }
+        } else if (msg instanceof FileRegion) {
+            FileRegion region = (FileRegion) msg;
+            if (region.transferred() >= region.count()) {
+                in.remove();
+                return 0;
+            }
+
+            long localFlushedAmount = doWriteFileRegion(region);
+            if (localFlushedAmount > 0) {
+                in.progress(localFlushedAmount);
+                if (region.transferred() >= region.count()) {
+                    in.remove();
+                }
+                return 1;
+            }
+        } else {
+            // Should not reach here.
+            throw new Error();
+        }
+        return WRITE_STATUS_SNDBUF_FULL;
+    }
+
     @Override
     protected void doWrite(ChannelOutboundBuffer in) throws Exception {
-        int writeSpinCount = -1;
-
-        boolean setOpWrite = false;
-        for (;;) {
+        int writeSpinCount = config().getWriteSpinCount();
+        do {
             Object msg = in.current();
             if (msg == null) {
                 // Wrote all messages.
@@ -180,81 +236,10 @@ public abstract class AbstractNioByteChannel extends AbstractNioChannel {
                 // Directly return here so incompleteWrite(...) is not called.
                 return;
             }
+            writeSpinCount -= doWriteInternal(in, msg);
+        } while (writeSpinCount > 0);
 
-            if (msg instanceof ByteBuf) {
-                ByteBuf buf = (ByteBuf) msg;
-                int readableBytes = buf.readableBytes();
-                if (readableBytes == 0) {
-                    in.remove();
-                    continue;
-                }
-
-                boolean done = false;
-                long flushedAmount = 0;
-                if (writeSpinCount == -1) {
-                    writeSpinCount = config().getWriteSpinCount();
-                }
-                for (int i = writeSpinCount - 1; i >= 0; i --) {
-                    int localFlushedAmount = doWriteBytes(buf);
-                    if (localFlushedAmount == 0) {
-                        setOpWrite = true;
-                        break;
-                    }
-
-                    flushedAmount += localFlushedAmount;
-                    if (!buf.isReadable()) {
-                        done = true;
-                        break;
-                    }
-                }
-
-                in.progress(flushedAmount);
-
-                if (done) {
-                    in.remove();
-                } else {
-                    // Break the loop and so incompleteWrite(...) is called.
-                    break;
-                }
-            } else if (msg instanceof FileRegion) {
-                FileRegion region = (FileRegion) msg;
-                boolean done = region.transferred() >= region.count();
-
-                if (!done) {
-                    long flushedAmount = 0;
-                    if (writeSpinCount == -1) {
-                        writeSpinCount = config().getWriteSpinCount();
-                    }
-
-                    for (int i = writeSpinCount - 1; i >= 0; i--) {
-                        long localFlushedAmount = doWriteFileRegion(region);
-                        if (localFlushedAmount == 0) {
-                            setOpWrite = true;
-                            break;
-                        }
-
-                        flushedAmount += localFlushedAmount;
-                        if (region.transferred() >= region.count()) {
-                            done = true;
-                            break;
-                        }
-                    }
-
-                    in.progress(flushedAmount);
-                }
-
-                if (done) {
-                    in.remove();
-                } else {
-                    // Break the loop and so incompleteWrite(...) is called.
-                    break;
-                }
-            } else {
-                // Should not reach here.
-                throw new Error();
-            }
-        }
-        incompleteWrite(setOpWrite);
+        incompleteWrite(writeSpinCount < 0);
     }
 
     @Override

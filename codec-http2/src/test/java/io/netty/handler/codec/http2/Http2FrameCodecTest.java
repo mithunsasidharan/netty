@@ -21,6 +21,7 @@ import io.netty.buffer.UnpooledByteBufAllocator;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.UnsupportedMessageTypeException;
@@ -37,6 +38,7 @@ import io.netty.handler.codec.http2.Http2Stream.State;
 import io.netty.handler.logging.LogLevel;
 import io.netty.util.AbstractReferenceCounted;
 import io.netty.util.AsciiString;
+import io.netty.util.ReferenceCountUtil;
 import io.netty.util.ReferenceCounted;
 import io.netty.util.concurrent.DefaultPromise;
 import io.netty.util.concurrent.GlobalEventExecutor;
@@ -55,10 +57,25 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static io.netty.handler.codec.http2.Http2CodecUtil.isStreamIdValid;
-import static io.netty.handler.codec.http2.Http2FrameStream.CONNECTION_STREAM;
 import static org.hamcrest.Matchers.instanceOf;
-import static org.junit.Assert.*;
-import static org.mockito.Mockito.*;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertThat;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyBoolean;
+import static org.mockito.Mockito.anyInt;
+import static org.mockito.Mockito.anyLong;
+import static org.mockito.Mockito.anyShort;
+import static org.mockito.Mockito.eq;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.same;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 
 /**
  * Unit tests for {@link Http2FrameCodec}.
@@ -468,7 +485,7 @@ public class Http2FrameCodecTest {
 
         int windowUpdate = 1024;
 
-        channel.write(new DefaultHttp2WindowUpdateFrame(windowUpdate).stream(CONNECTION_STREAM));
+        channel.write(new DefaultHttp2WindowUpdateFrame(windowUpdate));
 
         assertEquals(initialWindowSizeBefore + windowUpdate, localFlow.initialWindowSize());
     }
@@ -481,7 +498,7 @@ public class Http2FrameCodecTest {
         verify(frameWriter).writeSettings(eq(http2HandlerCtx), same(settings), any(ChannelPromise.class));
     }
 
-    @Test(timeout = 1000)
+    @Test(timeout = 5000)
     public void newOutboundStream() {
         final Http2FrameStream stream = frameCodec.newStream();
 
@@ -664,6 +681,47 @@ public class Http2FrameCodecTest {
                 "HTTP/2", new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/"));
         channel.pipeline().fireUserEventTriggered(upgradeEvent);
         assertEquals(1, upgradeEvent.refCnt());
+    }
+
+    @Test
+    public void upgradeWithoutFlowControlling() throws Exception {
+        channel.pipeline().addAfter(http2HandlerCtx.name(), null, new ChannelInboundHandlerAdapter() {
+            @Override
+            public void channelRead(final ChannelHandlerContext ctx, Object msg) throws Exception {
+                if (msg instanceof Http2DataFrame) {
+                    // Simulate consuming the frame and update the flow-controller.
+                    Http2DataFrame data = (Http2DataFrame) msg;
+                    ctx.writeAndFlush(new DefaultHttp2WindowUpdateFrame(data.initialFlowControlledBytes())
+                            .stream(data.stream())).addListener(new ChannelFutureListener() {
+                        @Override
+                        public void operationComplete(ChannelFuture future) throws Exception {
+                            Throwable cause = future.cause();
+                            if (cause != null) {
+                                ctx.fireExceptionCaught(cause);
+                            }
+                        }
+                    });
+                }
+                ReferenceCountUtil.release(msg);
+            }
+        });
+
+        frameListener.onHeadersRead(http2HandlerCtx, Http2CodecUtil.HTTP_UPGRADE_STREAM_ID, request, 31, false);
+
+        // Using reflect as the constructor is package-private and the class is final.
+        Constructor<UpgradeEvent> constructor =
+                UpgradeEvent.class.getDeclaredConstructor(CharSequence.class, FullHttpRequest.class);
+
+        // Check if we could make it accessible which may fail on java9.
+        Assume.assumeTrue(ReflectionUtil.trySetAccessible(constructor) == null);
+
+        String longString = new String(new char[70000]).replace("\0", "*");
+        DefaultFullHttpRequest request =
+            new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/", bb(longString));
+
+        HttpServerUpgradeHandler.UpgradeEvent upgradeEvent = constructor.newInstance(
+            "HTTP/2", request);
+        channel.pipeline().fireUserEventTriggered(upgradeEvent);
     }
 
     private static ChannelPromise anyChannelPromise() {
