@@ -37,8 +37,10 @@ import java.nio.channels.GatheringByteChannel;
 import java.nio.channels.ScatteringByteChannel;
 import java.nio.channels.WritableByteChannel;
 import java.nio.charset.Charset;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
@@ -2080,6 +2082,43 @@ public abstract class AbstractByteBufTest {
         buffer.writeBytes(copied);
         assertEquals("Hello, World!", buffer.toString(CharsetUtil.ISO_8859_1));
         copied.release();
+    }
+
+    @Test(timeout = 10000)
+    public void testToStringMultipleThreads() throws Throwable {
+        buffer.clear();
+        buffer.writeBytes("Hello, World!".getBytes(CharsetUtil.ISO_8859_1));
+
+        final AtomicInteger counter = new AtomicInteger(30000);
+        final AtomicReference<Throwable> errorRef = new AtomicReference<Throwable>();
+        List<Thread> threads = new ArrayList<Thread>();
+        for (int i = 0; i < 10; i++) {
+            Thread thread = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        while (errorRef.get() == null && counter.decrementAndGet() > 0) {
+                            assertEquals("Hello, World!", buffer.toString(CharsetUtil.ISO_8859_1));
+                        }
+                    } catch (Throwable cause) {
+                        errorRef.compareAndSet(null, cause);
+                    }
+                }
+            });
+            threads.add(thread);
+        }
+        for (Thread thread : threads) {
+            thread.start();
+        }
+
+        for (Thread thread : threads) {
+            thread.join();
+        }
+
+        Throwable error = errorRef.get();
+        if (error != null) {
+            throw error;
+        }
     }
 
     @Test
@@ -4582,6 +4621,27 @@ public abstract class AbstractByteBufTest {
             buffer.capacity(4);
             assertEquals(4, buffer.capacity());
             assertEquals(13, buffer.maxCapacity());
+        } finally {
+            buffer.release();
+        }
+    }
+
+    @Test(expected = IndexOutOfBoundsException.class)
+    public void testReaderIndexLargerThanWriterIndex() {
+        String content1 = "hello";
+        String content2 = "world";
+        int length = content1.length() + content2.length();
+        ByteBuf buffer = newBuffer(length);
+        buffer.setIndex(0, 0);
+        buffer.writeCharSequence(content1, CharsetUtil.US_ASCII);
+        buffer.markWriterIndex();
+        buffer.skipBytes(content1.length());
+        buffer.writeCharSequence(content2, CharsetUtil.US_ASCII);
+        buffer.skipBytes(content2.length());
+        assertTrue(buffer.readerIndex() <= buffer.writerIndex());
+
+        try {
+            buffer.resetWriterIndex();
         } finally {
             buffer.release();
         }
